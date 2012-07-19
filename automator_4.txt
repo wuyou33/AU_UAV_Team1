@@ -1,0 +1,9 @@
+#4 planes, 500x500
+final_4_500m_1.course
+final_4_500m_2.course
+final_4_500m_3.course
+
+#4 planes, 1000x1000
+final_4_1000m_1.course
+final_4_1000m_2.course
+final_4_1000m_3.course

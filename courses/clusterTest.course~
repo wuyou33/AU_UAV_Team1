@@ -1,0 +1,21 @@
+#Settings:
+#	Number of planes: 3
+#	Field size: 500 meters by 500 meters
+#	North-west corner: (32.606573, -85.490363)
+#	Altitude range: 400 - 400
+
+#Starting waypoints
+#Plane ID	Latitude	Longitude	Altitude
+0		32.603330	-85.488000	400.000000
+1		32.605050	-85.490266	400.000000
+2		32.604779	-85.490266	400.000000
+
+#Plane ID: 0
+0		32.606000	-85.485500	400.000000
+
+
+#Plane ID: 1
+1		32.605050	-85.486000	400.000000
+
+#Plane ID: 2
+2		32.604779	-85.486000	400.000000

@@ -1,0 +1,688 @@
+/*
+genetic
+This is a program to optimize 11 parameters in the 2012 swarm algorithm.
+It uses genetic optimization methods to generate optimal solutions.
+Compiled with G++.
+*/
+
+/* TODO - genetic.cpp checklist
+Make sure to clear the scores file before running!
+Make sure collisionAvoidance is reading the correct parameters file!
+Make sure the time is the same as the one in the evaluator!
+rosmake!
+Check the course!
+Check your end condition!
+Check your seeds!
+Compile!
+Run!
+*/
+
+#include <stdio.h>
+#include <string.h>
+#include <cstring>
+#include <vector>
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+#include <iostream>
+#include <fstream>
+#include <algorithm>
+#include <signal.h>
+#include <sstream>
+#include <unistd.h>
+#include <sys/wait.h>
+
+#define COURSENAME "final_16_500m_3.course\n" //the '\n' is CRITICAL
+#define SIMULATION_TIME 180
+#define POOL_SIZE 8
+#define MUTATION_RATE 3							// inverse rate of mutation
+#define EXTREME_MUTATION_RATE 30
+
+#define BUFFER_TIME 5
+#define SLEEP_TIME (SIMULATION_TIME+16)
+#define OUTPUT_ADDITION "_test"
+#define LENGTH_OF_EXTENSION 7 //".course" has 7 characters
+#define EPSILON 1e-6
+
+using namespace std;
+
+struct candidate
+{ 
+    // traits (parameters)
+	double clusterDistance;
+	double flockTime;
+	double maxForce;
+	double alpha;
+	double beta;
+	double gamma;
+	double alphaTop; 			// same as alphaBot
+	double betaTop;
+	double betaBot;				// same as betaBotF
+	double alphaTopF;			// same as alphaBotF
+	double betaTopF;
+    
+    // fitness (performance metrics)
+    int collisions;
+    int waypoints;
+    int conflicts;
+    double distRatio;
+    
+    // booleans to track evaluation
+    bool evaluated;
+    
+    // keep track of which candidate this is
+    int ID;
+};
+
+struct by_performance			// order of importance: collisions, conflicts (b/c they make collisions more likely, waypoints)
+{ 
+    bool operator()(candidate const &A, candidate const &B) { 
+        return (A.collisions < B.collisions) ||
+           ((A.collisions == B.collisions) && (A.conflicts < B.conflicts)) || 
+           ((A.collisions == B.collisions) && (A.conflicts == B.conflicts) &&
+              (A.waypoints > B.waypoints));
+    }
+};
+
+struct by_evaluated
+{ 
+    bool operator()(candidate const &A, candidate const &B) { 
+        return (A.evaluated);
+    }
+};
+
+int poolSize = POOL_SIZE;							// size of the entire population
+int numberPruned;									// number of members pruned in the current generation
+vector<candidate> pool (poolSize);					// vector of the entire pool of cadidates in a single generation
+vector<candidate> history;							// stores all candidates ever considered to avoid repeats
+int numGenerations = 0;
+int numCandidates = 0;
+char course [256] = COURSENAME;
+int pfds[2];										// used to keep track of pipes for system monitoring/evaluation
+int numSeeds = 0;									// number of seed candidates introduced
+
+// define limits for mutation {min, max, maximum number of increments, increment size}
+double clusterDistanceLimits [] = {0, 180, 4, 5};
+double flockTimeLimits [] = {0, 8, 3, 1};
+double maxForceLimits [] = {100, 10000, 40, 25};
+double alphaLimits [] = {0.00004, 0.002, 5, 0.00004};
+double betaLimits [] = {0.0001, 0.002, 5, 0.0001};
+double gammaLimits [] = {500, 1000, 4, 25};
+double alphaTopLimits [] = {0.2, 1, 4, 0.025};
+double betaTopLimits [] = {0.01, 0.1, 4, 0.01};
+double betaBotLimits [] = {0.5, 2, 4, 0.1};
+double alphaTopFLimits [] = {0.125, 1, 4, 0.025};
+double betaTopFLimits [] = {0.01, 0.1, 4, 0.01};
+
+// primary functions (steps of the GA)
+void initialize(int numToGenerate, int startingMember);		// produces a random pool of candidates
+void evaluate(void);										// evaluates new members of the pool
+void prune(void);											// eliminates candidates based on a probability function of their results
+void mate(void);											// produces child candidates from surviving parents
+candidate mutateMember(candidate c);						// mutates a candidate's traits
+
+// secondary functions
+void printDebug(int start, int finish);						// for printing debug statements/results
+void pruneCandidate(candidate* c);							// kills off a specific candidate by resetting all its parameters and results
+double inheritTrait(double p1Trait, double p2Trait);		// gives a child a trait from one of its parents
+double mutateTrait(double current, double limits [4]);		// mutates a trait based on the mutation rate and limits
+void writeParameters(int member);							// writes candidate parameters to file for collisionAvoidance use
+void readWriteResults(int member, string scoreSheetName);	// writes candidate parameters and result to a file for records
+void seedPool(string scoreSheetName);						// seeds a pool with specific candidates
+
+int main()
+{
+	srand ( time(NULL) );													// initialize random seed
+
+	if(pipe(pfds) == -1)													// pipe for running evaluations
+	{
+		perror("Pipe");
+		exit(1);
+	}
+	
+	// SEED (as needed)
+	seedPool("parameters_original");
+	seedPool("parameters_original_noFlocks");
+			
+	initialize(poolSize-numSeeds, numSeeds);								// STEP 1: INITIALIZE THE POOL (ignore seeded slots)
+	printDebug(0, poolSize);
+
+	evaluate();																// STEP 2: EVALUATE THE POOL
+
+	sort(pool.begin(), pool.end(), by_performance());						// STEP 3: RANK THE CANDIDATES
+
+	cout << "\nGENERATION " << numGenerations << "\n";
+	printDebug(0, poolSize);
+
+	while (numGenerations < 8)												// TODO - END CONDITION
+	{
+		prune();															// STEP 4: PRUNE POORLY-PERFORMING MEMBERS
+		std::sort(pool.begin(), pool.end(), by_evaluated());
+	
+		cout << "\nPRUNED GENERATION " << numGenerations << "\n";
+		printDebug(0, poolSize);
+	
+		mate();																// STEP 5: MATE AND MUTATE
+		numGenerations++;
+		evaluate();															// repeat step 2
+		sort(pool.begin(), pool.end(), by_performance());					// repeat step 3
+
+		cout << "\nGENERATION " << numGenerations << "\n";
+		printDebug(0, poolSize);
+	}																		// repeat until awesome
+
+	cout << "TEST COMPLETE" << endl;
+	cout << "Total generations: " << numGenerations << "\nTotal individuals evaluated: " << numCandidates << endl;
+	return 0;
+}
+
+void initialize(int numToGenerate, int startingMember)
+{
+	// initialize a random pool of individuals
+	for (unsigned int member = 0; member < numToGenerate; member += 1)
+	{
+		candidate c;
+
+		numCandidates++;						// increase the total number of candidates considered		
+		c.ID = numCandidates;					// track this candidate's ID
+
+		c.clusterDistance = rand() % 201;								// clusterDistance [0 200]
+		
+		c.flockTime = rand() % 11;										// flockTime [0 10]
+		
+		int maxForceMultiplier = rand() % 200 + 1;
+		c.maxForce = maxForceMultiplier*50;								// maxForce [50 10000]
+		
+		int alphaMultiplier = rand() % 197;
+		c.alpha = 0.00004+(alphaMultiplier*0.00001);					// alpha [0.00004 0.002]
+		
+		int betaMultiplier = rand() % 199;
+		c.beta = 0.0001+(betaMultiplier*0.00001);						// beta [0.0001 0.002]
+		
+		int gammaMultiplier = rand() % 10 +1;
+		c.gamma = 250*gammaMultiplier;									// gamma [250 1000]
+		
+		int alphaTopMultiplier = rand() % 33;
+		c.alphaTop = 0.2+(alphaTopMultiplier*0.025);					// alphaTop = alphaBot [0.2 1]
+		
+		int betaTopMultiplier = rand() % 100;
+		c.betaTop = 0.01+(betaTopMultiplier*0.01);						// betaTop [0.01 0.1]
+
+		int betaBotMultiplier = rand() % 16;
+		c.betaBot = 0.5+(betaBotMultiplier*0.1);						// betaBot = betaBotF[0.5 2]
+
+		int alphaTopFMultiplier = rand() % 876;
+		c.alphaTopF = 0.125+(alphaTopFMultiplier*0.001);				// alphaTopF = alphaBotF [0.125 1]
+
+		int betaTopFMultiplier = rand() % 100;
+		c.betaTopF = 0.01+(betaTopFMultiplier*0.01);					// betaTopF [0.01 1]
+		
+		c.collisions = 0;												// initialize results to zero
+		c.waypoints = 0;
+		c.conflicts = 0;
+		c.distRatio = 0;
+		c.evaluated = false;											// this has not been evaluated yet
+				
+		pool[member+startingMember] = c;							// store the input parameters as a member of a generation
+	}
+}
+
+void evaluate(void)
+{
+	// write to parameters file
+	//open the parameters file
+	for (unsigned int member = 0; member < poolSize; member += 1)
+	{		
+		// check if any member of the pool is in the history
+		for (unsigned int member2 = 0; member2 < history.size(); member2 += 1)
+		{
+			// if the two are the same, mutate
+			if (pool[member].clusterDistance == pool[member2].clusterDistance &&
+				pool[member].flockTime == pool[member2].flockTime &&
+				pool[member].maxForce == pool[member2].maxForce &&
+				pool[member].alpha == pool[member2].alpha &&
+				pool[member].beta == pool[member2].beta &&
+				pool[member].gamma == pool[member2].gamma &&
+				pool[member].alphaTop == pool[member2].alphaTop &&
+				pool[member].betaTop == pool[member2].betaTop &&
+				pool[member].betaBot == pool[member2].betaBot &&
+				pool[member].alphaTopF == pool[member2].alphaTopF &&
+				pool[member].betaTopF == pool[member2].betaTopF)
+			{
+				cout << "mutating so we don't repeat a member from history" << endl;
+				pool[member2] = mutateMember(pool[member2]);
+				pool[member2].evaluated = false;
+			}
+		}
+
+	
+		if (!pool[member].evaluated)
+		{
+			//check that the parameters are at least at their minimum
+			if (pool[member].clusterDistance < clusterDistanceLimits[0]) pool[member].clusterDistance = clusterDistanceLimits[0];
+			if (pool[member].flockTime < flockTimeLimits[0]) pool[member].flockTime = flockTimeLimits[0];
+			if (pool[member].maxForce < maxForceLimits[0]) pool[member].maxForce = maxForceLimits[0];
+			if (pool[member].alpha < alphaLimits[0]) pool[member].alpha = alphaLimits[0];
+			if (pool[member].beta < betaLimits[0]) pool[member].beta = betaLimits[0];
+			if (pool[member].gamma < gammaLimits[0]) pool[member].gamma = gammaLimits[0];
+			if (pool[member].alphaTop < alphaTopLimits[0]) pool[member].alphaTop = alphaTopLimits[0];
+			if (pool[member].betaTop < betaTopLimits[0]) pool[member].betaTop = betaTopLimits[0];
+			if (pool[member].betaBot < betaBotLimits[0]) pool[member].betaBot = betaBotLimits[0];
+			if (pool[member].alphaTopF < alphaTopFLimits[0]) pool[member].alphaTopF = alphaTopFLimits[0];
+			if (pool[member].betaTopF < betaTopFLimits[0]) pool[member].betaTopF = betaTopFLimits[0];
+			
+			writeParameters(member);				// write parameters to the parameters file
+			
+			// RUN SIMULATION
+			
+			//construct our strings to send
+			string outputName = string(course);
+			outputName = outputName.substr(0, outputName.size() - LENGTH_OF_EXTENSION - 1);
+				
+			ostringstream sin;
+			sin << pool[member].ID;
+			string IDString = sin.str();
+			
+			outputName = outputName + OUTPUT_ADDITION + IDString + "\n";
+
+			//fork our process
+			int pid;
+			pid = fork();
+	
+			if(pid == 0)
+			{
+				//we're redirecting STDIN such that it comes from the pipe
+				//close standard in
+				close(STDIN_FILENO);
+		
+				//duplicate our stdin as the pipe output
+				dup2(pfds[0], STDIN_FILENO);
+				
+				//child process
+				system("roslaunch AU_UAV_ROS evaluation.launch");
+			}
+			else
+			{
+				sleep(BUFFER_TIME);
+				//send out output over that there pipe
+				printf("Writing to the pipe! %s\n", course);
+				write(pfds[1], course, strlen(course));
+				printf("Writing to the pipe! %s\n", outputName.c_str());
+				write(pfds[1], outputName.c_str(), strlen(outputName.c_str()));
+		
+				//parent waits some time, then kills before starting new one
+				sleep(SLEEP_TIME);
+				
+				printf("Killing Process ID #%d\n", pid);
+				kill(pid, SIGKILL);
+				waitpid(pid, NULL, 0);
+
+				//give the SIGKILL time to work
+				sleep(BUFFER_TIME);
+			}			
+			// read in results from file to pool, write parameters from pool to file		
+			pool[member].evaluated = true;			// make sure we don't evaluate a candidate twice
+			history.push_back(pool[member]);		// store this candidate in history to avoid repeat candidates in the future
+			
+			string outputNameRead = outputName.substr(0,outputName.size()-1);
+			readWriteResults(member, outputNameRead);
+		}
+	}
+}
+
+void prune(void)
+{
+	numberPruned = 0;
+	for (unsigned int i = 0; i < poolSize; i += 1)
+	{
+		int rank = i+1;
+		double spinner = rand() % (poolSize+1) + 1;
+		double survivalRate = (-rank*rank)/poolSize+poolSize;
+		
+		if (survivalRate < spinner)
+		{
+			pruneCandidate(&pool[i]);
+			numberPruned++;
+		}
+	}
+}
+
+void mate(void)
+{	
+	int numberAlive = poolSize-numberPruned;
+	cout << "Number of suviving candidates: " << numberAlive << endl;
+	
+	if (numberAlive == 0)							// this shouldn't actually happen, but just in case...
+	{
+		initialize(poolSize, 0);
+		cout << "all individuals were killed off somehow... reinitializing..." << endl;
+	}
+	
+	else if (numberAlive == 1)							// if there is only one survivor (rare case)
+	{	
+		cout << "repopulating from single survivor" << endl;
+		candidate c;
+		c = pool[0];
+
+		for (unsigned int i = 1; i < poolSize; i += 1)
+		{
+			cout << "mutating from single survivor" << endl;
+			numCandidates++;						// increase the total number of candidates considered		
+			c.ID = numCandidates;					// track this candidate's ID
+			pool[i] = mutateMember(c);
+			cout << "child created!\nchild genotype:" << endl;
+			numberAlive++;
+		}				
+	}
+	
+	else
+	{
+		for (unsigned int child = numberAlive; child < poolSize; child += 1)
+		{
+			cout << "selecting parents for mating" << endl;
+			int p1 = rand() % numberAlive;
+			int p2 = rand() % numberAlive;
+			while (p1 == p2)							// don't let a candidate mate with itself
+			{
+				p2 = rand() % numberAlive;
+			}
+		
+			cout << "creating empty child candidate" << endl;
+			candidate c;							// create the child and get its traits from its parents
+			numCandidates++;						// increase the total number of candidates considered		
+			c.ID = numCandidates;					// track this candidate's ID
+		
+			// inherit traits from parents
+			c.clusterDistance = inheritTrait(pool[p1].clusterDistance, pool[p2].clusterDistance);
+			c.flockTime = inheritTrait(pool[p1].flockTime, pool[p2].flockTime);
+			c.maxForce = inheritTrait(pool[p1].maxForce, pool[p2].maxForce);
+			c.alpha = inheritTrait(pool[p1].alpha, pool[p2].alpha);
+			c.beta = inheritTrait(pool[p1].beta, pool[p2].beta);
+			c.gamma = inheritTrait(pool[p1].gamma, pool[p2].gamma);
+			c.alphaTop = inheritTrait(pool[p1].alphaTop, pool[p2].alphaTop);
+			c.betaTop = inheritTrait(pool[p1].betaTop, pool[p2].betaTop);
+			c.betaBot = inheritTrait(pool[p1].betaBot, pool[p2].betaBot);
+			c.alphaTopF = inheritTrait(pool[p1].alphaTopF, pool[p2].alphaTopF);
+			c.betaTopF = inheritTrait(pool[p1].betaTopF, pool[p2].betaTopF);
+
+			c.evaluated = false;
+		
+			cout << "mutating child candidate" << endl;
+			c = mutateMember(c);
+		
+			cout << "child created!\nchild genotype:" << endl;
+			pool[child] = c;
+		}
+	}
+}
+
+candidate mutateMember(candidate c)
+{
+	candidate mutant = c;
+
+	mutant.clusterDistance = mutateTrait(mutant.clusterDistance, clusterDistanceLimits);
+	mutant.flockTime = mutateTrait(mutant.flockTime, flockTimeLimits);
+	mutant.maxForce = mutateTrait(mutant.maxForce, maxForceLimits);
+	mutant.alpha = mutateTrait(mutant.alpha, alphaLimits);
+	mutant.beta = mutateTrait(mutant.beta, betaLimits);
+	mutant.gamma = mutateTrait(mutant.gamma, gammaLimits);
+	mutant.alphaTop = mutateTrait(mutant.alphaTop, alphaTopLimits);
+	mutant.betaTop = mutateTrait(mutant.betaTop, betaTopLimits);
+	mutant.betaBot = mutateTrait(mutant.betaBot, betaBotLimits);
+	mutant.alphaTopF = mutateTrait(mutant.alphaTopF, alphaTopFLimits);
+	mutant.betaTopF = mutateTrait(mutant.betaTopF, betaTopFLimits);
+
+	return mutant;
+}
+
+void printDebug(int start, int finish)
+{
+	cout << "ID, clusterDistance, flockTime, maxForce, alpha, beta, gamma, alphaTop, betaTop, betaBot, alphaTopF, betaTopF" << endl;
+	
+	for (unsigned int i = start; i < finish; i += 1)
+	{
+		cout << pool[i].ID << ",";
+		cout << pool[i].clusterDistance << ",";
+		cout << pool[i].flockTime << ",";
+		cout << pool[i].maxForce << ",";
+		cout << pool[i].alpha << ",";
+		cout << pool[i].beta << ",";
+		cout << pool[i].gamma << ",";
+		cout << pool[i].alphaTop << ",";
+		cout << pool[i].betaTop << ",";
+		cout << pool[i].betaBot << ",";
+		cout << pool[i].alphaTopF << ",";
+		cout << pool[i].betaTopF << "\n";
+	}
+	cout << "\n";
+
+	for (unsigned int i = start; i < finish; i += 1)
+	{
+		cout << pool[i].collisions << ",";
+		cout << pool[i].waypoints << ",";
+		cout << pool[i].conflicts << ",";
+		cout << pool[i].distRatio << "\n";
+	}
+	cout << "\n";
+}
+
+void pruneCandidate(candidate* c)
+{
+	c->clusterDistance = 0;
+	c->flockTime = 0;
+	c->maxForce = 0;
+	c->alpha = 0;
+	c->beta = 0;
+	c->gamma = 0;
+	c->alphaTop = 0; 			// same as alphaBot
+	c->betaTop = 0;
+	c->betaBot = 0;				// same as betaBotF
+	c->alphaTopF = 0;			// same as alphaBotF
+	c->betaTopF = 0;
+    
+    // fitness (performance metrics)
+    c->collisions = 0;
+    c->waypoints = 0;
+    c->conflicts = 0;
+    c->distRatio = 0;
+    
+    c->evaluated = false;
+}
+
+double inheritTrait(double p1Trait, double p2Trait)
+{
+	int inheritChance = rand() % 2 + 1;
+	if (inheritChance == 1) return p1Trait;
+	else return p2Trait;
+}
+
+double mutateTrait(double current, double limits [4])
+{
+	int mutateChance = rand() % MUTATION_RATE;
+	int extremeMutateChance = rand() % EXTREME_MUTATION_RATE;
+	
+	double min = limits[0];
+	double max = limits[1];
+	double maxNumIncrements = limits[2];
+	double incrementSize = limits[3];
+	
+	if (extremeMutateChance == 1)			// an extreme mutation has occurred- allow for greater-than-normal variation
+	{
+		maxNumIncrements = (max-min)/incrementSize;
+	}
+	
+	if (mutateChance == 1)
+	{
+		int posNeg = rand() % 2;	
+		double newValue;
+	
+		if (posNeg == 0)
+		{
+			int increments = rand() % (int)(maxNumIncrements+1);
+			if (increments = 0) newValue = current;
+			else newValue = current - (increments*incrementSize);				// subtract
+		}
+		else
+		{
+			int increments = rand() % (int)(maxNumIncrements+1);
+			if (increments = 0) newValue = current;
+			else newValue = current + (increments*incrementSize);				// add
+		}
+		
+		if (newValue>max) newValue = max;
+		else if (newValue<min) newValue = min;
+		else if (newValue<0)
+	
+		if (newValue < 	EPSILON && newValue > -EPSILON) newValue = current;		// this really shouldn't be happening
+
+		return newValue;
+	}
+	else return current;
+}
+
+void writeParameters(int member)					// write parameters to file
+{
+	FILE *fp;
+	char filename [256];
+	strcpy (filename, std::getenv("HOME"));
+	strcat (filename, "/ros_workspace/AU_UAV_ROS/src/parameters.txt");
+
+	fp = fopen(filename, "w");
+
+	//make sure we got a good open
+	if(fp == NULL)
+	{
+		printf("\nERROR SAVING DATA, COPY TERMINAL OUTPUT!!!\n");
+	}
+	else
+	{
+		fprintf(fp, "%f\n", pool[member].clusterDistance);
+		fprintf(fp, "%f\n", pool[member].flockTime);
+		fprintf(fp, "%f\n", pool[member].maxForce);
+		fprintf(fp, "%f\n", pool[member].alpha);
+		fprintf(fp, "%f\n", pool[member].beta);
+		fprintf(fp, "%f\n", pool[member].gamma);
+		fprintf(fp, "%f\n", pool[member].alphaTop);
+		fprintf(fp, "%f\n", pool[member].betaTop);
+		fprintf(fp, "%f\n", pool[member].betaBot);
+		fprintf(fp, "%f\n", pool[member].alphaTopF);
+		fprintf(fp, "%f\n", pool[member].betaTopF);
+	}
+	
+	fclose(fp);
+}
+
+void readWriteResults(int member, string scoreSheetName)
+{
+	FILE *fr;
+	char filename [256];
+	
+	char * cstr;
+	cstr = new char [scoreSheetName.size()+1];
+	strcpy (cstr, scoreSheetName.c_str());
+  	
+	strcpy (filename, std::getenv("HOME"));
+	strcat (filename, "/ros_workspace/AU_UAV_ROS/scores/");
+	strcat (filename, cstr);
+	strcat (filename, ".score");
+
+	fr = fopen(filename, "a+");
+	
+	if(fr != NULL)
+	{
+		char buffer[256];
+		//while we have something in the file
+		
+		int varCount = 0;
+		
+		// write results from file to pool
+		while(fgets(buffer, sizeof(buffer), fr))
+		{	
+			varCount++;
+			// first line is time, skip it
+			if (varCount == 2) pool[member].waypoints = atof(buffer);
+			if (varCount == 3) pool[member].conflicts = atof(buffer);		
+			if (varCount == 4) pool[member].collisions = atof(buffer);
+			if (varCount == 5) pool[member].distRatio = atof(buffer);
+		}
+		
+		// write parameters from pool to file
+		fprintf(fr, "\n\nclusterDistance:\n%f\n", pool[member].clusterDistance);
+		fprintf(fr, "\nflockTime:\n%f\n", pool[member].flockTime);
+		fprintf(fr, "\nmaxForce:\n%f\n", pool[member].maxForce);
+		fprintf(fr, "\nalpha:\n%f\n", pool[member].alpha);
+		fprintf(fr, "\nbeta:\n%f\n", pool[member].beta);
+		fprintf(fr, "\ngamma:\n%f\n", pool[member].gamma);
+		fprintf(fr, "\nalphaTop:\n%f\n", pool[member].alphaTop);
+		fprintf(fr, "\nbetaTop:\n%f\n", pool[member].betaTop);
+		fprintf(fr, "\nbetaBot:\n%f\n", pool[member].betaBot);
+		fprintf(fr, "\nalphaTopF:\n%f\n", pool[member].alphaTopF);
+		fprintf(fr, "\nbetaTopF:\n%f\n", pool[member].betaTopF);
+		
+		fclose(fr);
+	}
+	else
+	{
+		printf("ERROR: Bad file name\n");
+	}
+}
+
+void seedPool(string scoreSheetName)
+{
+	candidate seed;
+	numCandidates++;						// increase the total number of candidates considered
+	seed.ID = numCandidates;				// track this candidate's ID
+
+	FILE *fr;
+	char filename [256];
+	
+	char * cstr;
+	cstr = new char [scoreSheetName.size()+1];
+	strcpy (cstr, scoreSheetName.c_str());
+  	
+	strcpy (filename, std::getenv("HOME"));
+	strcat (filename, "/ros_workspace/AU_UAV_ROS/seed_candidates/");
+	strcat (filename, cstr);
+	strcat (filename, ".score");
+
+	fr = fopen(filename, "r");
+	
+	if(fr != NULL)
+	{
+		char buffer[256];
+		//while we have something in the file
+		
+		int lineCount = 0;
+		
+		// read results from file to seed
+		while(fgets(buffer, sizeof(buffer), fr))
+		{	
+			lineCount++;
+			if (lineCount == 8) seed.clusterDistance = atof(buffer);
+			if (lineCount == 11) seed.flockTime = atof(buffer);
+			if (lineCount == 14) seed.maxForce = atof(buffer);
+			if (lineCount == 17) seed.alpha = atof(buffer);
+			if (lineCount == 20) seed.beta = atof(buffer);
+			if (lineCount == 23) seed.gamma = atof(buffer);
+			if (lineCount == 26) seed.alphaTop = atof(buffer);
+			if (lineCount == 29) seed.betaTop = atof(buffer);
+			if (lineCount == 32) seed.betaBot = atof(buffer);
+			if (lineCount == 35) seed.alphaTopF = atof(buffer);
+			if (lineCount == 38) seed.betaTopF = atof(buffer);
+		}
+		fclose(fr);
+	}
+	else
+	{
+		printf("ERROR: Bad file name\n");
+	}
+	
+	// set the seed results to zero rather than read them in because time might be different
+	seed.waypoints = 0;
+	seed.conflicts = 0;
+	seed.collisions = 0;
+	seed.distRatio = 0;
+	
+	pool[numSeeds] = seed;
+	numSeeds++;								// increase the total number of seed candidates introduced
+}

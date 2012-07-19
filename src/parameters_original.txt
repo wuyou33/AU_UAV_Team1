@@ -1,0 +1,30 @@
+#clusterDistance: max waypoint separation distance for which UAVs will be clustered (12m/ 1s travel)
+60
+
+#flockTime: max travel time from follower to leader vector for flock initialization
+8
+
+#MAXFORCE: maximum force imposed by one plane on another, except when they are in conflict radius
+6000
+
+#alpha and beta are parameters that define the bivariate normal potential field
+#ALPHA
+0.00008
+#BETA
+0.00005
+
+#these variables define the limits of the independent/swarm leader force function
+#GAMMA
+1000
+#ALPHATOP
+0.25
+#BETATOP
+0.01
+#BETABOT
+1
+
+#these variables define the limits of the swarm follower force function
+#ALPHATOPF
+0.25
+#BETATOPF
+0.1
